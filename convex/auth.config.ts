@@ -9,7 +9,8 @@
 export default {
   providers: [
     {
-      domain: "https://outstanding-peacock-486.convex.site",
+      // Must match your Convex deployment domain (region + .convex.cloud)
+      domain: "https://outstanding-peacock-486.eu-west-1.convex.cloud",
       applicationID: "convex",
     },
   ],

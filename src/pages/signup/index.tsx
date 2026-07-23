@@ -26,33 +26,29 @@ const Signup = () => {
   const createCompany = useMutation(api.tenants.createCompany);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Keep a ref of the latest auth state so the submit handler (an async
-  // function) can wait for the client to become authenticated.
-  const authStateRef = useRef<boolean>(isAuthenticated);
-  useEffect(() => {
-    authStateRef.current = isAuthenticated;
-  }, [isAuthenticated]);
+  // When the user successfully signs up we set `pendingCreate` to the
+  // company name. An effect watches `isAuthenticated` and when it becomes
+  // true and `pendingCreate` is set, it executes the `createCompany`
+  // mutation exactly once. This avoids polling and relies on the
+  // reactive `useConvexAuth()` state.
+  const [pendingCreate, setPendingCreate] = useState<string | null>(null);
 
-  const waitForAuthenticated = async (timeout = 5000) => {
-    const start = Date.now();
-    return new Promise<void>((resolve, reject) => {
-      if (authStateRef.current && !isLoading) {
-        resolve();
-        return;
-      }
-      const interval = setInterval(() => {
-        if (authStateRef.current && !isLoading) {
-          clearInterval(interval);
-          resolve();
-          return;
+  useEffect(() => {
+    if (pendingCreate && isAuthenticated && !isLoading) {
+      (async () => {
+        try {
+          await createCompany({ companyName: pendingCreate });
+          setPendingCreate(null);
+          navigate("/dashboard");
+        } catch (err) {
+          // Let the submit handler show the error via toast; keep UX simple
+          setPendingCreate(null);
+          console.error("Error creating company after auth:", err);
+          // Re-throw so any outer catch can pick it up if needed
         }
-        if (Date.now() - start > timeout) {
-          clearInterval(interval);
-          reject(new Error("Timed out waiting for authentication"));
-        }
-      }, 100);
-    });
-  };
+      })();
+    }
+  }, [pendingCreate, isAuthenticated, isLoading, createCompany, navigate]);
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -66,17 +62,14 @@ const Signup = () => {
     try {
       await signIn("password", { email, password, name, flow: "signUp" });
 
-      // Wait for the Convex client to recognize the authenticated session
-      // before calling the server mutation that requires authentication.
-      await waitForAuthenticated(8000);
-
-      await createCompany({ companyName });
-      navigate("/dashboard");
+      // Do not call createCompany here. Instead set the pending company name
+      // and let the effect above call the mutation once `isAuthenticated`
+      // becomes `true`.
+      setPendingCreate(companyName);
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not create your company"
       );
-    } finally {
       setIsSubmitting(false);
     }
   };
