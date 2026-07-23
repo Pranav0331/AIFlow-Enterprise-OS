@@ -2,6 +2,8 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { useNavigate, Link } from "react-router-dom";
 import { useAuthActions } from "@convex-dev/auth/react";
+import { useConvexAuth } from "convex/react";
+import { useEffect, useRef } from "react";
 import { useMutation } from "convex/react";
 import { api } from "@/lib/convexApi";
 import { Button } from "@/components/ui/button";
@@ -20,8 +22,37 @@ import { toast } from "sonner";
 const Signup = () => {
   const navigate = useNavigate();
   const { signIn } = useAuthActions();
+  const { isAuthenticated, isLoading } = useConvexAuth();
   const createCompany = useMutation(api.tenants.createCompany);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Keep a ref of the latest auth state so the submit handler (an async
+  // function) can wait for the client to become authenticated.
+  const authStateRef = useRef<boolean>(isAuthenticated);
+  useEffect(() => {
+    authStateRef.current = isAuthenticated;
+  }, [isAuthenticated]);
+
+  const waitForAuthenticated = async (timeout = 5000) => {
+    const start = Date.now();
+    return new Promise<void>((resolve, reject) => {
+      if (authStateRef.current && !isLoading) {
+        resolve();
+        return;
+      }
+      const interval = setInterval(() => {
+        if (authStateRef.current && !isLoading) {
+          clearInterval(interval);
+          resolve();
+          return;
+        }
+        if (Date.now() - start > timeout) {
+          clearInterval(interval);
+          reject(new Error("Timed out waiting for authentication"));
+        }
+      }, 100);
+    });
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -34,6 +65,11 @@ const Signup = () => {
     setIsSubmitting(true);
     try {
       await signIn("password", { email, password, name, flow: "signUp" });
+
+      // Wait for the Convex client to recognize the authenticated session
+      // before calling the server mutation that requires authentication.
+      await waitForAuthenticated(8000);
+
       await createCompany({ companyName });
       navigate("/dashboard");
     } catch (error) {
