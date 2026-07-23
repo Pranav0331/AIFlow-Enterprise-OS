@@ -34,17 +34,17 @@ const Signup = () => {
   const [pendingCreate, setPendingCreate] = useState<string | null>(null);
 
   useEffect(() => {
+    console.debug("signup effect: pendingCreate", pendingCreate, "isAuthenticated", isAuthenticated, "isLoading", isLoading);
     if (pendingCreate && isAuthenticated && !isLoading) {
       (async () => {
         try {
+          console.debug("Creating company after auth:", pendingCreate);
           await createCompany({ companyName: pendingCreate });
           setPendingCreate(null);
           navigate("/dashboard");
         } catch (err) {
-          // Let the submit handler show the error via toast; keep UX simple
           setPendingCreate(null);
           console.error("Error creating company after auth:", err);
-          // Re-throw so any outer catch can pick it up if needed
         }
       })();
     }
