@@ -13,6 +13,8 @@ import type * as auditLogs from "../auditLogs.js";
 import type * as auth from "../auth.js";
 import type * as departments from "../departments.js";
 import type * as http from "../http.js";
+import type * as join from "../join.js";
+import type * as lib_codes from "../lib/codes.js";
 import type * as lib_tenant from "../lib/tenant.js";
 import type * as policies from "../policies.js";
 import type * as requests from "../requests.js";
@@ -31,6 +33,8 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   departments: typeof departments;
   http: typeof http;
+  join: typeof join;
+  "lib/codes": typeof lib_codes;
   "lib/tenant": typeof lib_tenant;
   policies: typeof policies;
   requests: typeof requests;
