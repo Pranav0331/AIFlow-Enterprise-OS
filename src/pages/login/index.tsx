@@ -29,7 +29,7 @@ const Login = () => {
     setIsSubmitting(true);
     try {
       await signIn("password", { email, password, flow: "signIn" });
-      navigate("/dashboard");
+      navigate("/redirect");
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not log you in"

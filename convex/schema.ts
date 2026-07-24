@@ -25,17 +25,36 @@ export default defineSchema({
     isAnonymous: v.optional(v.boolean()),
     tenantId: v.optional(v.id("tenants")),
     role: v.optional(
-      v.union(v.literal("admin"), v.literal("manager"), v.literal("employee"))
+      v.union(
+        v.literal("admin"),
+        v.literal("hr"),
+        v.literal("manager"),
+        v.literal("employee")
+      )
     ),
+    departmentId: v.optional(v.id("departments")),
+    managerId: v.optional(v.id("users")),
+    isActive: v.optional(v.boolean()),
   })
     .index("email", ["email"])
     .index("phone", ["phone"])
-    .index("by_tenant", ["tenantId"]),
+    .index("by_tenant", ["tenantId"])
+    .index("by_manager", ["managerId"])
+    .index("by_department", ["departmentId"]),
 
   tenants: defineTable({
     name: v.string(),
     createdAt: v.number(),
   }),
+
+  /** Company join codes, one per role, used to self-provision new accounts. */
+  joinCodes: defineTable({
+    tenantId: v.id("tenants"),
+    role: v.union(v.literal("hr"), v.literal("manager"), v.literal("employee")),
+    code: v.string(),
+  })
+    .index("by_tenant_and_role", ["tenantId", "role"])
+    .index("by_code", ["code"]),
 
   departments: defineTable({
     tenantId: v.id("tenants"),
@@ -60,13 +79,24 @@ export default defineSchema({
   requests: defineTable({
     tenantId: v.id("tenants"),
     title: v.string(),
+    category: v.union(
+      v.literal("leave"),
+      v.literal("expense"),
+      v.literal("equipment"),
+      v.literal("other")
+    ),
+    description: v.optional(v.string()),
     status: v.union(
       v.literal("pending"),
       v.literal("approved"),
       v.literal("rejected")
     ),
     requestedBy: v.id("users"),
-  }).index("by_tenant", ["tenantId"]),
+    reviewedBy: v.optional(v.id("users")),
+    reviewedAt: v.optional(v.number()),
+  })
+    .index("by_tenant", ["tenantId"])
+    .index("by_requester", ["requestedBy"]),
 
   agents: defineTable({
     tenantId: v.id("tenants"),

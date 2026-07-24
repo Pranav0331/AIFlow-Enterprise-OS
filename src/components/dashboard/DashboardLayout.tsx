@@ -18,15 +18,22 @@ import {
 } from "@/components/ui/sidebar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { dashboardNavItems } from "./dashboardNav";
+import type { DashboardNavItem } from "./dashboardNav";
 import { LayoutDashboard, LogOut, Workflow } from "lucide-react";
 
+interface DashboardLayoutProps {
+  /** Nav items shown under the "Workspace" group, specific to the caller's role. */
+  navItems: DashboardNavItem[];
+  /** Route the "Overview" link and logo point to (e.g. "/admin"). */
+  homePath: string;
+}
+
 /**
- * Shell layout for the whole Admin Dashboard: sidebar nav across the 8
- * placeholder sections, plus a top bar with the current company name, role,
- * and logout.
+ * Shared shell layout reused by all 4 role dashboards (Admin, HR, Manager,
+ * Employee): sidebar nav across that role's sections, plus a top bar with
+ * the current company name, role, and logout.
  */
-const DashboardLayout = () => {
+const DashboardLayout = ({ navItems, homePath }: DashboardLayoutProps) => {
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut } = useAuthActions();
@@ -42,7 +49,7 @@ const DashboardLayout = () => {
       <div className="flex h-full w-full">
         <Sidebar>
           <SidebarHeader>
-            <Link to="/dashboard" className="flex items-center gap-2 px-2 py-1.5">
+            <Link to={homePath} className="flex items-center gap-2 px-2 py-1.5">
               <span className="flex h-8 w-8 items-center justify-center rounded-md bg-gradient-primary text-primary-foreground">
                 <Workflow className="h-4 w-4" />
               </span>
@@ -59,9 +66,9 @@ const DashboardLayout = () => {
                   <SidebarMenuItem>
                     <SidebarMenuButton
                       asChild
-                      isActive={location.pathname === "/dashboard"}
+                      isActive={location.pathname === homePath}
                     >
-                      <Link to="/dashboard">
+                      <Link to={homePath}>
                         <LayoutDashboard />
                         <span>Overview</span>
                       </Link>
@@ -74,7 +81,7 @@ const DashboardLayout = () => {
               <SidebarGroupLabel>Workspace</SidebarGroupLabel>
               <SidebarGroupContent>
                 <SidebarMenu>
-                  {dashboardNavItems.map((item) => (
+                  {navItems.map((item) => (
                     <SidebarMenuItem key={item.path}>
                       <SidebarMenuButton
                         asChild
