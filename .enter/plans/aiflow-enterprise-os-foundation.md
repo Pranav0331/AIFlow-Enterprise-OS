@@ -1,133 +1,86 @@
-# AIFlow Enterprise OS — Foundation (Landing + Multi-Tenant Auth + Dashboard Shell)
+# Role-Based Company Access & Separate Dashboards
 
 ## Context
-Build the foundation for a multi-tenant "AI-Native Enterprise Operating System": a public
-landing page, company signup that provisions an isolated tenant workspace, role-based auth
-(Admin/Manager/Employee), and an empty Admin Dashboard shell with 8 placeholder sections.
-AI agent logic (Gemini) and audit-log export (Notion) are explicitly out of scope for this
-phase.
+AIFlow currently has one flow: Admin signs up, creates a company (tenant), and sees one `/dashboard` with mostly-placeholder sections. There is no way for anyone else to join that company. We need a secure company-join-code system (HR/Manager/Employee codes), server-side tenant/role resolution, and four separate dashboards (`/admin`, `/hr`, `/manager`, `/employee`) with real (non-placeholder) data for the sections the user listed. AI Agents, Analytics and Audit Trail stay as placeholders (explicitly out of scope).
 
-**Backend constraint (confirmed with user):** Convex is a hard hackathon requirement and must
-remain the standalone system of record — it is NOT Enter Cloud/Postgres. Convex cannot be
-provisioned from this sandbox (provisioning requires an interactive `npx convex login`), so:
-- All Convex backend code (schema, auth config, queries/mutations) is written in this repo
-  under `/convex`, ready to deploy.
-- The frontend connects **directly** to Convex via `convex/react` + `@convex-dev/auth/react`
-  (not proxied through Enter Cloud), so real-time subscriptions work natively.
-- The user runs the actual `npx convex login` / `npx convex dev` / `convex deploy` commands
-  themselves (exact commands given at the end of this plan) and pastes the resulting
-  deployment URL into one config file.
-- Enter Cloud/Postgres is not used for application data.
+Existing patterns to reuse:
+- `convex/lib/tenant.ts` → `getCallerTenantId(ctx)` pattern (never trust client tenantId) — will extend with `requireRole`.
+- `convex/tenants.ts` → `createCompany` mutation pattern (signIn client-side, then a reactive `useEffect` on `isAuthenticated` calls a Convex mutation) — reused for the new "Join Company" flow.
+- `src/components/dashboard/DashboardLayout.tsx` + `dashboardNav.ts` + `PlaceholderSection.tsx` — generalized into one shared layout used by all 4 role dashboards.
+- `src/components/auth/ProtectedRoute.tsx` — extended with a role check.
 
-## Dependencies to add
-- `convex` (client SDK + CLI, used for `npx convex dev`/`deploy` and `convex/react`)
-- `@convex-dev/auth` (Convex Auth — Password provider for email/password signup & login)
+## Schema changes — `convex/schema.ts`
+- `users`: add `"hr"` to the `role` union; add `departmentId: v.optional(v.id("departments"))`, `managerId: v.optional(v.id("users"))`, `isActive: v.optional(v.boolean())`; add indexes `by_manager` and `by_department`.
+- New table `joinCodes`: `{ tenantId: v.id("tenants"), role: v.union("hr","manager","employee"), code: v.string() }`, indexes `by_tenant_and_role` (`["tenantId","role"]`) and `by_code` (`["code"]`, used for O(1) lookup on join).
+- `requests`: add `category: v.union("leave","expense","equipment","other")`, `description: v.optional(v.string())`, `reviewedBy: v.optional(v.id("users"))`, `reviewedAt: v.optional(v.number())`; add index `by_requester` (`["requestedBy"]`). Use existing `_creationTime` for ordering (no new field needed).
 
-## Convex backend (`/convex`, new directory)
+## Convex security core — `convex/lib/tenant.ts`
+Add `requireUser(ctx)` (throws if unauthenticated) and `requireRole(ctx, roles: Role[])` (throws if no tenant or role not allowed; returns the full caller user doc). Every new/changed query and mutation below uses one of these — tenantId is always read from the caller's own user record, never from client args. Any mutation that receives a foreign id (departmentId, managerId, requestId, target userId) must re-fetch that doc and verify its `tenantId` equals the caller's `tenantId` before using it.
 
-- **`convex/schema.ts`** — merges Convex Auth's `authTables` with app tables. Every
-  tenant-scoped table stores `tenantId` and has a `by_tenant` index:
-  - `users` (extended authTables.users): adds `tenantId: optional(id("tenants"))`,
-    `role: optional(union("admin","manager","employee"))`
-  - `tenants`: `name`, `createdAt` (the tenant record itself — no tenantId)
-  - `departments`, `policies`, `budgets`, `requests`, `agents`, `auditLogs`: each has
-    `tenantId: id("tenants")` + minimal descriptive fields (name/title/status/amount as
-    relevant), indexed `by_tenant`
-- **`convex/auth.config.ts` + `convex/auth.ts`** — Convex Auth setup with the `Password`
-  provider (email/password).
-- **`convex/tenants.ts`** — `createCompany` mutation: reads the just-authenticated user
-  (`getAuthUserId`), creates a `tenants` row, and patches that user with
-  `tenantId` + `role: "admin"`. This is how "company signup" provisions an isolated workspace
-  and makes the signer-upper an Admin automatically.
-- **`convex/users.ts`** — `currentUser` query (returns the authed user's profile incl.
-  tenantId/role, or null); `listByTenant` query scoped to the caller's own tenantId (used by
-  Employees/Managers placeholder screens to prove isolation).
-- **`convex/departments.ts`, `policies.ts`, `requests.ts`, `agents.ts`, `auditLogs.ts`** — one
-  `listByTenant` query each, always scoped to `ctx.auth` → current user's `tenantId` (never a
-  client-supplied tenantId), returning an empty list for now. This is the enforcement point for
-  "one company's data can never be read by another company."
+## Convex — join codes
+- `convex/lib/codes.ts` (new): `generateUniqueCode(ctx, role)` — builds `HR-XXXXXX` / `MGR-XXXXXX` / `EMP-XXXXXX` (6 random uppercase alphanumeric chars) and retries on collision using the `by_code` index.
+- `convex/tenants.ts`: `createCompany` also inserts the 3 `joinCodes` rows (hr/manager/employee) for the new tenant. Add `listJoinCodes` query (admin-only, returns `[]` otherwise) and `regenerateJoinCode` mutation (admin-only, args `{ role }`, patches that tenant+role code to a new unique value).
+- `convex/join.ts` (new): `joinWithCode` mutation, args `{ code }`. Requires an authenticated user with no `tenantId` yet, looks up `joinCodes` by normalized code via `by_code`, throws `"Invalid company code"` if none, else patches the user with the resolved `tenantId`/`role` and returns `{ role }`.
 
-## Frontend
+## Convex — feature mutations/queries
+- `convex/users.ts`: add `updateRole` (admin-only; target must be same tenant; role ∈ hr/manager/employee), `updateEmployee` (admin/hr; same-tenant target; patches name/departmentId/managerId/isActive, validating departmentId/managerId belong to caller's tenant and managerId user has role "manager"), `listManagers` (admin/hr), `listMyTeam` (manager-only; users where `managerId == caller._id`).
+- `convex/departments.ts`: add `create` and `remove` (admin/hr; remove also clears `departmentId` on affected users via `by_department`).
+- `convex/policies.ts`: add `create` and `update` (admin/hr; same-tenant check on update).
+- `convex/requests.ts`: add `create` (any authenticated tenant member; category/title/description, status defaults `"pending"`), `listMine` (own requests via `by_requester`), `listForManagerTeam` (manager-only; requests from users whose `managerId == caller._id`), `setStatus` (admin/hr/manager; manager may only act on their own team's requests — verified by loading the requester and checking `managerId`).
 
-### Convex client wiring
-- **`src/lib/convex.ts`** — exports `convexUrl` read from a local constant (see below) and a
-  `convexClient` instance (or `null` if unconfigured), plus `isConvexConfigured` boolean.
-  No `VITE_*` env vars (unsupported on Enter) — the URL lives in a plain committed constant the
-  user edits once after deploying.
-- **`src/config/convex.ts`** — `export const CONVEX_URL = "";` with a comment explaining to
-  paste the deployment URL from `npx convex dev` / `convex deploy` here.
-- **`src/main.tsx`** — wrap `<App />` with `ConvexAuthProvider` (from `@convex-dev/auth/react`)
-  using the client from `src/lib/convex.ts`.
-- **`src/components/system/ConvexSetupNotice.tsx`** — if `isConvexConfigured` is false, render
-  this full-page notice (with the CLI steps) instead of the router, so the app fails gracefully
-  before a real deployment exists.
+## Frontend — auth & routing
+- `src/pages/join/index.tsx` (new): "Join Company" form (Company Code, Name, Email, Password) → `signIn("password", {..., flow:"signUp"})`, then on `isAuthenticated` call `joinWithCode`, then `navigate(`/${role}`)` (mirrors `Signup`'s reactive pattern).
+- `src/pages/login/index.tsx`: after `signIn`, `navigate("/redirect")` instead of `/dashboard`.
+- `src/pages/signup/index.tsx`: after `createCompany` resolves, `navigate("/admin")` instead of `/dashboard`; add a link to `/join` ("Joining a team? Use your company code").
+- `src/components/auth/RoleRedirect.tsx` (new, mounted at `/redirect`): reads `api.users.currentUser`, redirects to `/admin`, `/hr`, `/manager`, `/employee` based on role (or `/signup` if authenticated with no tenant yet, or `/login` if unauthenticated).
+- `src/components/auth/RoleProtectedRoute.tsx` (new): wraps the existing auth check (reuses `ProtectedRoute`'s loading/redirect logic) and additionally verifies `currentUser.role` is in an allowed list, redirecting to `/redirect` on mismatch.
+- `src/router.tsx`: remove the `/dashboard` tree; add `/redirect`, `/join`, and four role trees `/admin`, `/hr`, `/manager`, `/employee`, each `<RoleProtectedRoute allowed={[...]}><DashboardLayout navItems={...} homePath="/x" /></RoleProtectedRoute>` with an `<Outlet/>`-based index + children.
 
-### Auth
-- **`src/components/auth/ProtectedRoute.tsx`** — uses `useConvexAuth()`; redirects to `/login`
-  when unauthenticated, shows a spinner while loading.
-- **`src/pages/signup/index.tsx`** — "Create Company" form (company name, your name, email,
-  password). Calls `useAuthActions().signIn("password", { flow: "signUp", ... })` then the
-  `createCompany` mutation; redirects to `/dashboard`.
-- **`src/pages/login/index.tsx`** — email/password sign-in via `signIn("password", { flow:
-  "signIn", ... })`; redirects to `/dashboard`.
+## Frontend — shared dashboard components (`src/components/dashboard/`)
+- `DashboardLayout.tsx`: generalized to accept `navItems` + `homePath` props (currently hardcoded to the admin set) — reused by all 4 role dashboards.
+- `dashboardNav.ts`: split into `adminNavItems`, `hrNavItems`, `managerNavItems`, `employeeNavItems`.
+- `EmployeeManagementTable.tsx` (new, shared by Admin & HR "Employees" pages): table of tenant users with inline edit (name, department select, manager select, active toggle) calling `users.updateEmployee`.
+- `DepartmentsManager.tsx` (new, shared by Admin & HR "Departments" pages): list + create + delete department, calling `departments.create`/`remove`.
+- `PoliciesManager.tsx` (new, shared by Admin & HR "Policies" pages): list + create + edit status, calling `policies.create`/`update`.
+- `RequestsTable.tsx` (new, generic): renders a list of requests with optional Approve/Reject actions — reused by Admin Requests (read-only), HR Employee Requests (approve/reject), Manager Team Requests/Pending Approvals/History, Employee My Requests/Request Status.
+- `RoleManagementTable.tsx` (new, Admin-only "HR" page): lists tenant users (excluding self) with a role `<Select>` (hr/manager/employee) calling `users.updateRole`.
 
-### Landing page (replaces current `src/pages/Index.tsx`)
-- Move to **`src/pages/landing/`** (`index.tsx` + `Hero.tsx`, `FeatureGrid.tsx`,
-  `CtaSection.tsx`, `LandingNavbar.tsx`) since it now has multiple sections.
-- Content: nav with "Log in" / "Create Company"; hero "AI-Native Enterprise Operating System —
-  Automate. Collaborate. Accelerate."; feature grid (Multi-Tenant Workspaces, Role-Based
-  Access, AI Agents, Policies & Budgets, Audit Trail, Real-Time Collaboration); final CTA
-  section with "Create Company" button.
+## Frontend — pages
+Reuse/rename existing placeholder pages via `rename_file` where content is unchanged (Agents, Analytics, Audit Trail move from `dashboard/*` to `admin/*` verbatim).
 
-### Admin Dashboard shell
-- **`src/components/dashboard/DashboardLayout.tsx`** — reuses existing shadcn `Sidebar`
-  primitives (`src/components/ui/sidebar.tsx`) for nav; top bar shows company name, role badge,
-  logout (`useAuthActions().signOut()`).
-- **`src/components/dashboard/dashboardNav.ts`** — the 8-item nav config (Employees, Managers,
-  Departments, Policies, Requests, AI Agents, Analytics, Audit Trail) with `lucide-react` icons
-  and routes.
-- **`src/components/dashboard/PlaceholderSection.tsx`** — one reusable "coming soon" component
-  (title, icon, description, optional live tenant-scoped count via the matching `listByTenant`
-  query) used by all 8 section routes instead of 8 near-duplicate files.
-- **`src/pages/dashboard/index.tsx`** — overview with welcome message + 8 cards linking into
-  each section.
-- Section routes render `<PlaceholderSection />` with different props per nav item.
+- `src/pages/admin/`: `index.tsx` (overview cards), `company-access/index.tsx` (3 codes + regenerate, via `listJoinCodes`/`regenerateJoinCode`), `employees/index.tsx`, `hr/index.tsx` (RoleManagementTable), `managers/index.tsx` (manager list + team size via `listManagers`+`listMyTeam`-style count), `departments/index.tsx`, `policies/index.tsx`, `requests/index.tsx` (tenant-wide, read-only), `agents/`, `analytics/`, `audit-trail/` (moved, untouched).
+- `src/pages/hr/`: `index.tsx`, `employees/index.tsx`, `departments/index.tsx`, `requests/index.tsx` (approve/reject), `policies/index.tsx`.
+- `src/pages/manager/`: `index.tsx` ("My Team", via `listMyTeam`), `team-requests/index.tsx`, `pending-approvals/index.tsx` (approve/reject), `request-history/index.tsx`.
+- `src/pages/employee/`: `index.tsx` (overview/counts), `new-request/index.tsx` (category+title+description form), `my-requests/index.tsx`, `request-status/index.tsx` (grouped by status), `my-profile/index.tsx` (read-only).
 
-### Routing (`src/router.tsx`)
-- `/` → landing
-- `/signup`, `/login` → auth pages
-- `/dashboard` (wrapped in `ProtectedRoute`) → `DashboardLayout` with children: index +
-  `employees`, `managers`, `departments`, `policies`, `requests`, `agents`, `analytics`,
-  `audit-trail`
-- `*` → existing `NotFound`
+Delete the old `src/pages/dashboard/` directory and old dashboard-only files once content is migrated.
 
-### Design tokens (`src/index.css`, `tailwind.config.ts`)
-Introduce an enterprise SaaS palette on top of the existing shadcn token structure: an
-indigo/violet `--primary`, a deep slate `--sidebar-background` for the dashboard sidebar, and a
-subtle `--gradient-primary` used on the landing hero/CTA. All new components use semantic
-tokens only (no raw `text-white`/`bg-black`).
+## Implementation checklist
+- [ ] `convex/schema.ts`: add `hr` role, `departmentId`/`managerId`/`isActive` on users + indexes; new `joinCodes` table; extend `requests` with category/description/reviewedBy/reviewedAt + `by_requester` index.
+- [ ] `convex/lib/tenant.ts`: add `requireUser`/`requireRole`.
+- [ ] `convex/lib/codes.ts`: add `generateUniqueCode`.
+- [ ] `convex/tenants.ts`: generate join codes on `createCompany`; add `listJoinCodes`, `regenerateJoinCode`.
+- [ ] `convex/join.ts`: add `joinWithCode` mutation resolving tenantId/role server-side only.
+- [ ] `convex/users.ts`: add `updateRole`, `updateEmployee`, `listManagers`, `listMyTeam`, each tenant/role-checked.
+- [ ] `convex/departments.ts`: add `create`, `remove`.
+- [ ] `convex/policies.ts`: add `create`, `update`.
+- [ ] `convex/requests.ts`: add `create`, `listMine`, `listForManagerTeam`, `setStatus`, each tenant/role-checked; manager restricted to own team.
+- [ ] `src/pages/join/index.tsx`: new Join Company form + reactive `joinWithCode` call + role-based redirect.
+- [ ] `src/pages/login/index.tsx` and `src/pages/signup/index.tsx`: update post-auth redirects and add cross-links.
+- [ ] `src/components/auth/RoleRedirect.tsx` and `RoleProtectedRoute.tsx`: new.
+- [ ] `src/router.tsx`: replace `/dashboard` tree with `/redirect`, `/join`, `/admin`, `/hr`, `/manager`, `/employee`.
+- [ ] `src/components/dashboard/DashboardLayout.tsx` + `dashboardNav.ts`: generalize for 4 role nav sets.
+- [ ] New shared components: `EmployeeManagementTable`, `DepartmentsManager`, `PoliciesManager`, `RequestsTable`, `RoleManagementTable`.
+- [ ] Build all Admin/HR/Manager/Employee pages listed above with real Convex data (no mock data, no localStorage).
+- [ ] Move Agents/Analytics/Audit Trail pages under `src/pages/admin/` unchanged; delete `src/pages/dashboard/`.
+- [ ] Confirm no query/mutation accepts `tenantId`/`companyId` as a client arg anywhere.
 
-### Housekeeping
-- Update `CodeGuideline.md` to document the new `convex/` directory and the new
-  `pages/landing`, `pages/signup`, `pages/login`, `pages/dashboard` structure, per the
-  project's own convention of keeping that doc current.
-
-## After implementation — commands the user runs locally
-Convex cannot be logged into from this sandbox. Once the code is in place, share:
-```
-npx convex login
-npx convex dev          # scaffolds/links the Convex project, prints the deployment URL
-npx @convex-dev/auth    # one-time setup: generates auth keys on the Convex deployment
-```
-Then paste the printed deployment URL into `src/config/convex.ts` (`CONVEX_URL`). For
-production: `npx convex deploy`, then update the constant to the prod URL before publishing on
-Enterpro.
-
-## Verification
-- Without a configured `CONVEX_URL`, the app shows `ConvexSetupNotice` instead of crashing.
-- Landing page renders at `/` with hero, features, and both CTAs.
-- `/signup` creates a tenant + admin user and lands on `/dashboard` (requires a live Convex
-  deployment to actually verify end-to-end; reviewed by code inspection here).
-- `/dashboard` is unreachable without auth (`ProtectedRoute` redirects to `/login`).
-- All 8 dashboard sections render as reusable placeholders with correct titles/icons/routes.
-- `pnpm lint` passes.
+## Verification checklist
+- [ ] Admin signs up → lands on `/admin`, sees Company Access page with 3 distinct codes (`HR-...`, `MGR-...`, `EMP-...`); regenerating one changes only that code.
+- [ ] New user joins with the `EMP-...` code → account created, auto-connected only to that tenant, redirected to `/employee`; repeat with `HR-...`/`MGR-...` codes landing on `/hr`/`/manager`.
+- [ ] Joining with an invalid/garbage code shows an error and does not create a tenant link.
+- [ ] Existing user logs in → redirected to the dashboard matching their stored role, not `/dashboard`.
+- [ ] Employee A from Company 1 cannot see Company 2's employees/requests/policies/departments even by manually calling the same queries (tenant mismatch → empty/forbidden).
+- [ ] Manager only sees/approves requests from users whose `managerId` is them; acting on another manager's team member's request is rejected server-side.
+- [ ] Employee "New Request" creates a request visible in their "My Requests"/"Request Status", and in HR's "Employee Requests" and Admin's "Requests" (same tenant only).
+- [ ] `pnpm lint` passes and the app builds with no TypeScript errors; manually click through all 4 dashboards in the preview.
